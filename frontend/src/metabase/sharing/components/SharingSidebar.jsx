@@ -107,7 +107,8 @@ const getEditingPulseWithDefaults = (state, props) => {
     pulse.name = dashboardWrapper.dashboards[dashboardWrapper.dashboardId].name;
   }
   if (!pulse.dashboard_id) {
-    pulse.dashboard_id = dashboardWrapper.dashboards[dashboardWrapper.dashboardId].id;
+    pulse.dashboard_id =
+      dashboardWrapper.dashboards[dashboardWrapper.dashboardId].id;
   }
   pulse.cards = cardsToPulseCards(
     nonTextCardsFromDashboard(props.dashboard),

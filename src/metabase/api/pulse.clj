@@ -9,6 +9,7 @@
             [metabase.integrations.slack :as slack]
             [metabase.models.card :refer [Card]]
             [metabase.models.collection :as collection]
+            [metabase.models.dashboard :refer [Dashboard]]
             [metabase.models.interface :as mi]
             [metabase.models.pulse :as pulse :refer [Pulse]]
             [metabase.models.pulse-channel :refer [channel-types PulseChannel]]
@@ -60,6 +61,9 @@
   (check-card-read-permissions cards)
   ;; if we're trying to create this Pulse inside a Collection, make sure we have write permissions for that collection
   (collection/check-write-perms-for-collection collection_id)
+  ;; prohibit sending dashboard subs for unauthorized dashboards
+  (when dashboard_id
+    (api/write-check Dashboard dashboard_id))
   (let [pulse-data {:name                name
                     :creator_id          api/*current-user-id*
                     :skip_if_empty       skip_if_empty
