@@ -1,8 +1,9 @@
 (ns metabase.query-processor.pivot-test
   "Tests for pivot table actions for the query processor"
   (:require [clojure.test :refer :all]
-            [metabase.query-processor.pivot :as sut]
-            [metabase.test :as mt]))
+            [metabase.query-processor.pivot :as pivot]
+            [metabase.test :as mt]
+            [metabase.util :as u]))
 
 (def ^:private applicable-drivers
   ;; Redshift takes A LONG TIME to insert the sample-dataset, so do not
@@ -15,54 +16,126 @@
   (mt/test-drivers applicable-drivers
     (mt/dataset sample-dataset
       (let [request {:database   (mt/db)
-                     :query      {:source-table (mt/$ids $$orders)
-                                  :aggregation  [[:count] [:sum (mt/$ids $orders.quantity)]]
-                                  :breakout     [[:fk-> (mt/$ids $orders.user_id) (mt/$ids $people.state)]
-                                                 [:fk-> (mt/$ids $orders.user_id) (mt/$ids $people.source)]
-                                                 [:fk-> (mt/$ids $orders.product_id) (mt/$ids $products.category)]]}
+                     :query      (mt/$ids orders
+                                   {:source-table $$orders
+                                    :aggregation  [[:count] [:sum $orders.quantity]]
+                                    :breakout     [$orders.user_id->people.state
+                                                   $orders.user_id->people.source
+                                                   $orders.product_id->products.category]})
                      :type       :query
                      :parameters []
-                     :pivot_rows [1 0]
-                     :pivot_cols [2]}]
+                     :pivot-rows [1 0]
+                     :pivot-cols [2]}]
         (testing "can generate queries for each new breakout"
-          (let [expected [{:query {:breakout    [[:fk-> (mt/$ids $orders.user_id) (mt/$ids $people.state)]
-                                                 [:fk-> (mt/$ids $orders.user_id) (mt/$ids $people.source)]
-                                                 [:fk-> (mt/$ids $orders.product_id) (mt/$ids $products.category)]
-                                                 [:expression "pivot-grouping"]]
-                                   :expressions {"pivot-grouping" [:abs 0]}}}
+          (let [expected (mt/$ids orders
+                           [{:query {:breakout    [$orders.user_id->people.state
+                                                   $orders.user_id->people.source
+                                                   $orders.product_id->products.category
+                                                   [:expression "pivot-grouping"]]
+                                     :expressions {"pivot-grouping" [:abs 0]}}}
 
-                          {:query {:breakout    [[:fk-> (mt/$ids $orders.product_id) (mt/$ids $products.category)]
-                                                 [:expression "pivot-grouping"]]
-                                   :expressions {"pivot-grouping" [:abs 3]}}}
+                            {:query {:breakout    [$orders.product_id->products.category
+                                                   [:expression "pivot-grouping"]]
+                                     :expressions {"pivot-grouping" [:abs 3]}}}
 
-                          {:query {:breakout    [[:fk-> (mt/$ids $orders.user_id) (mt/$ids $people.source)]
-                                                 [:fk-> (mt/$ids $orders.product_id) (mt/$ids $products.category)]
-                                                 [:expression "pivot-grouping"]]
-                                   :expressions {"pivot-grouping" [:abs 1]}}}
+                            {:query {:breakout    [$orders.user_id->people.source
+                                                   $orders.product_id->products.category
+                                                   [:expression "pivot-grouping"]]
+                                     :expressions {"pivot-grouping" [:abs 1]}}}
 
-                          {:query {:breakout    [[:fk-> (mt/$ids $orders.user_id) (mt/$ids $people.source)]
-                                                 [:fk-> (mt/$ids $orders.user_id) (mt/$ids $people.state)]
-                                                 [:expression "pivot-grouping"]]
-                                   :expressions {"pivot-grouping" [:abs 4]}}}
+                            {:query {:breakout    [$orders.user_id->people.source
+                                                   $orders.user_id->people.state
+                                                   [:expression "pivot-grouping"]]
+                                     :expressions {"pivot-grouping" [:abs 4]}}}
 
-                          {:query {:breakout    [[:fk-> (mt/$ids $orders.user_id) (mt/$ids $people.state)]
-                                                 [:expression "pivot-grouping"]]
-                                   :expressions {"pivot-grouping" [:abs 6]}}}
+                            {:query {:breakout    [$orders.user_id->people.state
+                                                   [:expression "pivot-grouping"]]
+                                     :expressions {"pivot-grouping" [:abs 6]}}}
 
-                          {:query {:breakout    [[:fk-> (mt/$ids $orders.user_id) (mt/$ids $people.source)]
-                                                 [:expression "pivot-grouping"]]
-                                   :expressions {"pivot-grouping" [:abs 5]}}}
+                            {:query {:breakout    [$orders.user_id->people.source
+                                                   [:expression "pivot-grouping"]]
+                                     :expressions {"pivot-grouping" [:abs 5]}}}
 
-                          {:query {:breakout    [[:expression "pivot-grouping"]]
-                                   :expressions {"pivot-grouping" [:abs 7]}}}]
+                            {:query {:breakout    [[:expression "pivot-grouping"]]
+                                     :expressions {"pivot-grouping" [:abs 7]}}}])
                 expected (map (fn [expected-val] (-> expected-val
                                                      (assoc :type       :query
                                                             :parameters []
-                                                            :pivot_rows [1 0]
-                                                            :pivot_cols [2])
+                                                            :pivot-rows [1 0]
+                                                            :pivot-cols [2])
                                                      (assoc-in [:query :fields] [[:expression "pivot-grouping"]])
                                                      (assoc-in [:query :aggregation] [[:count] [:sum (mt/$ids $orders.quantity)]])
                                                      (assoc-in [:query :source-table] (mt/$ids $$orders)))) expected)
-                actual   (map (fn [actual-val] (dissoc actual-val :database)) (sut/generate-queries request))]
+                actual   (map (fn [actual-val] (dissoc actual-val :database)) (pivot/generate-queries request))]
             (is (= 7 (count actual)))
             (is (= expected actual))))))))
+
+(deftest breakout-combinations-test
+  (is (= [[0 1 2]
+          nil
+          [0 1 2]    ; <- duplicate
+          [1 2]
+          [0 2]
+          [2]
+          [0 1]
+          [1]
+          [0]
+          nil]       ; <- duplicate
+         (#'pivot/breakout-combinations 3 [0 1 2] [])))
+  (testing "If pivot-rows is nil (but not empty) then we should basically act like it's (range 0 (count breakouts)) ?"
+    (is (= (#'pivot/breakout-combinations 3 nil nil)
+           (#'pivot/breakout-combinations 3 [0 1 2] nil))))
+  (testing "empty pivot-cols should be treated the same as nil pivot-cols"
+    (is (= (#'pivot/breakout-combinations 3 [0 1 2] [])
+           (#'pivot/breakout-combinations 3 [0 1 2] nil)))))
+
+(deftest generate-specified-breakouts-test
+  (is (= [[:a :b :c]
+          []
+          [:a :b :c] ; <- duplicate
+          [:b :c]
+          [:a :c]
+          [:c]
+          [:a :b]
+          [:b]
+          [:a]
+          []]       ; <- duplicate
+         (#'pivot/generate-specified-breakouts [:a :b :c] [0 1 2] [])))
+  (testing "Should throw an Exception if you pass in invalid pivot-rows"
+    (is (thrown-with-msg?
+         clojure.lang.ExceptionInfo
+         #"Invalid pivot-rows: specified breakout at index 3, but we only have 3 breakouts"
+         (#'pivot/generate-specified-breakouts [:a :b :c] [0 1 2 3] []))))
+  (testing "Should throw an Exception if you pass in invalid pivot-cols"
+    (is (thrown-with-msg?
+         clojure.lang.ExceptionInfo
+         #"Invalid pivot-cols: specified breakout at index 3, but we only have 3 breakouts"
+         (#'pivot/generate-specified-breakouts [:a :b :c] [] [0 1 2 3])))))
+
+(defn- test-query []
+  (mt/dataset sample-dataset
+    (mt/$ids orders
+      {:database     (mt/id)
+       :type         :query
+       :query        {:source-table $$orders
+                      :aggregation  [[:count]]
+                      :breakout     [$product_id->products.category
+                                     $user_id->people.source
+                                     !year.created_at]
+                      :filter       [:and
+                                     [:= $user_id->people.source "Facebook" "Google"]
+                                     [:= $product_id->products.category "Doohickey" "Gizmo"]
+                                     [:time-interval $created_at -2 :year {}]]}})))
+
+(deftest pivot-rows-test
+  (testing "The `:pivot-rows` param should have some sort of effect (#14329)"
+    (let [original-rows (mt/rows (pivot/run-pivot-query (test-query)))
+          rows-key      :pivot-rows
+          cols-key      :pivot-cols]
+      ;; make sure the stuff works with either normal lisp-case keys or snake case. It should only ever see lisp-case.
+      (doseq [key-xform [identity u/snake-key]
+      ;; But let's have it handle snake case too because that's how it was originally written
+              :let      [query (assoc (test-query) (key-xform rows-key) [0 1], (key-xform cols-key) [])]]
+        (testing (format "Query = %s" (pr-str query))
+          (is (not= original-rows
+                    (mt/rows (pivot/run-pivot-query query)))))))))
