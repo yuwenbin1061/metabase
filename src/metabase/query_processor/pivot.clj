@@ -46,23 +46,23 @@
       ;; e.g. given num-breakouts = 4; pivot-rows = [0 1 2]; pivot-cols = [3]
       ;; subtotal rows
       ;; _.range(1, pivotRows.length).map(i => [...pivotRow.slice(0, i), ...pivotCols])
-      ;;  => [0 3] [0 1 3] => 1001 1101
+      ;;  => [0 _ _ 3] [0 1 _ 3] => 0110 0100 => Group #6, #4
       (for [i (range 1 (count pivot-rows))]
         (concat (take i pivot-rows) pivot-cols))
       ;; “row totals” on the right
       ;; pivotRows
-      ;; => [0 1 2] => 1110
+      ;; => [0 1 2 _] => 1000 => Group #8
       [pivot-rows]
       ;; subtotal rows within “row totals”
       ;; _.range(1, pivotRows.length).map(i => pivotRow.slice(0, i))
-      ;; => [0] [0 1] => 1000 1100
+      ;; => [0 _ _ _] [0 1 _ _] => 1110 1100 => Group #14, #12
       (for [i (range 1 (count pivot-rows))]
         (take i pivot-rows))
       ;; “grand totals” row
       ;; pivotCols
-      ;; => [3] => 0001
+      ;; => [_ _ _ 3] => 0111 => Group #7
       [pivot-cols]
-      ;; bottom right corner [] => 0000
+      ;; bottom right corner [_ _ _ _] => 1111 => Group #15
       [[]])))))
 
 (s/defn ^:private add-grouping-field
