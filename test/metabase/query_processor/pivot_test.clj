@@ -139,3 +139,46 @@
         (testing (format "Query = %s" (pr-str query))
           (is (not= original-rows
                     (mt/rows (pivot/run-pivot-query query)))))))))
+
+(deftest dont-return-too-many-rows-test
+  (testing "Make sure pivot queries don't return too many rows (#14329)"
+    (mt/dataset sample-dataset
+      (let [rows (mt/rows (pivot/run-pivot-query (test-query)))]
+        (is (apply distinct? rows))
+        (is (= [["Doohickey" "Facebook" "2019-01-01T00:00:00Z" 0  263 ]
+                ["Doohickey" "Facebook" "2020-01-01T00:00:00Z" 0  89  ]
+                ["Doohickey" "Google"   "2019-01-01T00:00:00Z" 0  276 ]
+                ["Doohickey" "Google"   "2020-01-01T00:00:00Z" 0  100 ]
+                ["Gizmo"     "Facebook" "2019-01-01T00:00:00Z" 0  361 ]
+                ["Gizmo"     "Facebook" "2020-01-01T00:00:00Z" 0  113 ]
+                ["Gizmo"     "Google"   "2019-01-01T00:00:00Z" 0  325 ]
+                ["Gizmo"     "Google"   "2020-01-01T00:00:00Z" 0  101 ]
+                [nil         nil        nil                    7  1628]
+                ["Doohickey" "Facebook" "2019-01-01T00:00:00Z" 0  263 ]
+                ["Doohickey" "Facebook" "2020-01-01T00:00:00Z" 0  89  ]
+                ["Doohickey" "Google"   "2019-01-01T00:00:00Z" 0  276 ]
+                ["Doohickey" "Google"   "2020-01-01T00:00:00Z" 0  100 ]
+                ["Gizmo"     "Facebook" "2019-01-01T00:00:00Z" 0  361 ]
+                ["Gizmo"     "Facebook" "2020-01-01T00:00:00Z" 0  113 ]
+                ["Gizmo"     "Google"   "2019-01-01T00:00:00Z" 0  325 ]
+                ["Gizmo"     "Google"   "2020-01-01T00:00:00Z" 0  101 ]
+                [nil         "Facebook" "2019-01-01T00:00:00Z" 1  624 ]
+                [nil         "Facebook" "2020-01-01T00:00:00Z" 1  202 ]
+                [nil         "Google"   "2019-01-01T00:00:00Z" 1  601 ]
+                [nil         "Google"   "2020-01-01T00:00:00Z" 1  201 ]
+                ["Doohickey" nil        "2019-01-01T00:00:00Z" 2  539 ]
+                ["Doohickey" nil        "2020-01-01T00:00:00Z" 2  189 ]
+                ["Gizmo"     nil        "2019-01-01T00:00:00Z" 2  686 ]
+                ["Gizmo"     nil        "2020-01-01T00:00:00Z" 2  214 ]
+                [nil         nil        "2019-01-01T00:00:00Z" 3  1225]
+                [nil         nil        "2020-01-01T00:00:00Z" 3  403 ]
+                ["Doohickey" "Facebook" nil                    4  352 ]
+                ["Doohickey" "Google"   nil                    4  376 ]
+                ["Gizmo"     "Facebook" nil                    4  474 ]
+                ["Gizmo"     "Google"   nil                    4  426 ]
+                [nil         "Facebook" nil                    5  826 ]
+                [nil         "Google"   nil                    5  802 ]
+                ["Doohickey" nil        nil                    6  728 ]
+                ["Gizmo"     nil        nil                    6  900 ]
+                [nil         nil        nil                    7  1628]]
+               rows))))))
