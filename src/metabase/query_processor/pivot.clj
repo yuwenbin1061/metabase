@@ -1,121 +1,144 @@
 (ns metabase.query-processor.pivot
   "Pivot table actions for the query processor"
   (:require [clojure.core.async :as a]
-            [clojure.set :refer [map-invert]]
             [metabase.mbql.normalize :as normalize]
             [metabase.query-processor :as qp]
             [metabase.query-processor.context :as qp.context]
             [metabase.query-processor.context.default :as context.default]
             [metabase.query-processor.error-type :as qp.error-type]
             [metabase.query-processor.store :as qp.store]
-            [metabase.util.i18n :refer [tru]]))
+            [metabase.util.i18n :refer [tru]]
+            [schema.core :as s]))
 
-(defn powerset
-  "Generate a powerset while maintaining the original ordering as much as possible"
-  [xs]
-  (for [combo (reverse (range (int (Math/pow 2 (count xs)))))]
-    (for [item  (range 0 (count xs))
-          :when (not (zero? (bit-and (bit-shift-left 1 item) combo)))]
-      (nth xs item))))
+(defn- group-number
+  "Come up with a display name given a combination of breakout `indecies` e.g.
+
+    (group-number 3 [1])   ; -> 5
+    (group-number 3 [1 2]) ; -> 1"
+  [num-breakouts indecies]
+  (transduce
+   (map (partial bit-shift-left 1))
+   (completing bit-xor)
+   (int (dec (Math/pow 2 num-breakouts)))
+   indecies))
 
 (defn- breakout-combinations
   "Return a sequence of all breakout combinations (by index) we should generate queries for.
 
     (breakout-combinations 3 [1 2] nil) ;; -> [[0 1 2] [] [1 2] [2] [1]]"
   [num-breakouts pivot-rows pivot-cols]
-  (map
-   seq
-   (concat
-    [(range 0 num-breakouts)]
-    [pivot-cols]
-    (when (and (seq pivot-cols)
-               (seq pivot-rows))
-      [(cons (first pivot-rows) pivot-cols)])
-    (powerset (or pivot-rows
-                  ;; this can happen for the public/embed endpoints,
-                  ;; where we aren't given a pivot-rows / pivot-cols
-                  ;; parameter, so we'll just generate everything
-                  (vec (range 0 num-breakouts)))))))
-
-(defn- generate-specified-breakouts
-  "Generate breakouts specified by pivot-rows"
-  [breakouts pivot-rows pivot-cols]
   ;; validate pivot-rows/pivot-cols
   (doseq [[k pivots] {:pivot-rows pivot-rows, :pivot-cols pivot-cols}
           i          pivots]
-    (when (>= i (count breakouts))
+    (when (>= i num-breakouts)
       (throw (ex-info (tru "Invalid {0}: specified breakout at index {1}, but we only have {2} breakouts"
-                           (name k) i (count breakouts))
-                      {:type       qp.error-type/invalid-query
-                       :breakouts  breakouts
-                       :pivot-rows pivot-rows
-                       :pivot-cols pivot-cols}))))
-  (for [combo (breakout-combinations (count breakouts) pivot-rows pivot-cols)]
-    (for [i combo]
-      (nth breakouts i))))
+                           (name k) i num-breakouts)
+                      {:type          qp.error-type/invalid-query
+                       :num-breakouts num-breakouts
+                       :pivot-rows    pivot-rows
+                       :pivot-cols    pivot-cols}))))
+  (sort-by
+   (partial group-number num-breakouts)
+   (distinct
+    (map
+     vec
+     (concat
+      ;; e.g. given num-breakouts = 4; pivot-rows = [0 1 2]; pivot-cols = [3]
+      ;; subtotal rows
+      ;; _.range(1, pivotRows.length).map(i => [...pivotRow.slice(0, i), ...pivotCols])
+      ;;  => [0 3] [0 1 3] => 1001 1101
+      (for [i (range 1 (count pivot-rows))]
+        (concat (take i pivot-rows) pivot-cols))
+      ;; “row totals” on the right
+      ;; pivotRows
+      ;; => [0 1 2] => 1110
+      [pivot-rows]
+      ;; subtotal rows within “row totals”
+      ;; _.range(1, pivotRows.length).map(i => pivotRow.slice(0, i))
+      ;; => [0] [0 1] => 1000 1100
+      (for [i (range 1 (count pivot-rows))]
+        (take i pivot-rows))
+      ;; “grand totals” row
+      ;; pivotCols
+      ;; => [3] => 0001
+      [pivot-cols]
+      ;; bottom right corner [] => 0000
+      [[]])))))
 
-(defn add-grouping-field
+(s/defn ^:private add-grouping-field
   "Add the grouping field and expression to the query"
-  [query breakout bitmask]
-  (let [new-query (-> query
+  [outer-query breakouts group-number :- s/Int]
+  (let [new-query (-> outer-query
                       ;;TODO: `pivot-grouping` is not "magic" enough to mark it as an internal thing
                       (update-in [:query :fields]
                                  #(conj % [:expression "pivot-grouping"]))
-                      ;;TODO: replace this value with a bitmask or something to indicate the source better
                       (update-in [:query :expressions]
-                                 #(assoc % "pivot-grouping" [:abs bitmask])))]
+                                 #(assoc % "pivot-grouping" [:abs group-number])))]
     ;; in PostgreSQL and most other databases, all the expressions must be present in the breakouts
     (assoc-in new-query [:query :breakout]
-              (concat breakout (map (fn [expr] [:expression (name expr)])
-                                    (keys (get-in new-query [:query :expressions])))))))
+              (concat breakouts
+                      (map (fn [expr] [:expression (name expr)])
+                           (keys (get-in new-query [:query :expressions])))))))
 
-(defn- bitwise-not-truncate [num-bits val]
-  (- (dec (bit-shift-left 1 num-bits)) val))
-
-(defn generate-queries
+(defn- generate-queries
   "Generate the additional queries to perform a generic pivot table"
-  [{{all-breakouts :breakout} :query, :keys [pivot-rows pivot-cols query], :as request}]
+  [{{all-breakouts :breakout} :query, :keys [pivot-rows pivot-cols query], :as outer-query}]
   (try
-    (let [bitmask-index (map-invert (into {} (map-indexed hash-map all-breakouts)))
-          new-breakouts (generate-specified-breakouts all-breakouts pivot-rows pivot-cols)]
-      (for [breakout new-breakouts]
-        ;; this implements basically what PostgreSQL does for grouping -
-        ;; look at the original set of groups - if that column is part of *this*
-        ;; group, then set the appropriate bit (entry 1 sets bit 1, etc)
-        ;; at the end, perform a bitwise-not with a mask. Doing it manually
-        ;; because (bit-not) extends to a Long, and twos-complement and such
-        ;; make that messy.
-        (let [start-mask (reduce
-                          #(bit-or (bit-shift-left 1 %2) %1) 0
-                          (map #(get bitmask-index %) breakout))]
-          (add-grouping-field request breakout
-                              (bitwise-not-truncate (count all-breakouts) start-mask)))))
+    (for [breakout-indecies (breakout-combinations (count all-breakouts) pivot-rows pivot-cols)
+          :let              [group-number    (group-number (count all-breakouts) breakout-indecies)
+                             new-breakouts (for [i breakout-indecies]
+                                             (nth all-breakouts i))]]
+      (add-grouping-field outer-query new-breakouts group-number))
     (catch Throwable e
       (throw (ex-info (tru "Error generating pivot queries")
                       {:type qp.error-type/qp, :query query}
                       e)))))
+
+;; this function needs to be executed at the start of every new query to
+;; determine the mapping for maintaining query shape
+(defn- map-cols
+  {:arglists '([query context])}
+  [query {all-expected-cols ::all-expected-columns}]
+  (assert (seq all-expected-cols))
+  (let [query-cols (map-indexed vector (qp/query->expected-cols query))]
+    (map (fn [item]
+           (some #(when (= (:name item) (:name (second %)))
+                    (first %))
+                 query-cols))
+         all-expected-cols)))
+
+;; this function needs to be called for each row so that it can actually
+;; shape the row according to the `map-cols` fn above
+(defn- map-row
+  [row cols]
+  ;; the first query doesn't need any special mapping, it already has all the columns
+  (if cols
+    (for [i cols]
+      (when i
+        (nth row i)))
+    row))
 
 (defn- process-query-append-results
   "Reduce the results of a single `query` using `rf` and initial value `init`."
   [query rf init context]
   (if (a/poll! (qp.context/canceled-chan context))
     (ensure-reduced init)
-    (qp/process-query-sync
-     query
-     {:canceled-chan (qp.context/canceled-chan context)
-      :rff           (fn [_]
-                       (fn
-                         ([]        init)
-                         ([acc]     acc)
-                         ([acc row] (rf acc ((:row-mapping-fn context) row context)))))})))
+    (let [cols (map-cols query context)]
+      (qp/process-query-sync
+       query
+       {:canceled-chan (qp.context/canceled-chan context)
+        :rff           (fn [_]
+                         (fn
+                           ([]        init)
+                           ([acc]     acc)
+                           ([acc row] (rf acc (map-row row cols)))))}))))
 
 (defn- process-queries-append-results
   "Reduce the results of a sequence of `queries` using `rf` and initial value `init`."
   [queries rf init context]
   (reduce
    (fn [acc query]
-     (process-query-append-results query rf acc (assoc context
-                                                       :pivot-column-mapping ((:column-mapping-fn context) query))))
+     (process-query-append-results query rf acc context))
    init
    queries))
 
@@ -158,21 +181,4 @@
           all-queries
           (assoc context
                  :info (assoc info :context context)
-                 ;; this function needs to be executed at the start of every new query to
-                 ;; determine the mapping for maintaining query shape
-                 :column-mapping-fn (fn [query]
-                                      (let [query-cols (map-indexed vector (qp/query->expected-cols query))]
-                                        (map (fn [item]
-                                               (some #(when (= (:name item) (:name (second %)))
-                                                        (first %)) query-cols))
-                                             all-expected-cols)))
-                 ;; this function needs to be called for each row so that it can actually
-                 ;; shape the row according to the `:column-mapping-fn` above
-                 :row-mapping-fn (fn [row context]
-                                   ;; the first query doesn't need any special mapping, it already has all the columns
-                                   (if-let [col-mapping (:pivot-column-mapping context)]
-                                     (map (fn [mapping]
-                                            (when mapping
-                                              (nth row mapping)))
-                                          col-mapping)
-                                     row)))))))))
+                 ::all-expected-columns all-expected-cols)))))))
