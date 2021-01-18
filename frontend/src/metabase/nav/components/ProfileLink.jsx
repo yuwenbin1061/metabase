@@ -61,13 +61,13 @@ export default class ProfileLink extends Component {
         link: "/activity",
         event: `Navbar;Profile Dropdown;Activity ${tag}`,
       },
-      {
-        title: t`Help`,
-        icon: null,
-        link: MetabaseSettings.docsUrl(),
-        externalLink: true,
-        event: `Navbar;Profile Dropdown;About ${tag}`,
-      },
+      // {
+      //   title: t`Help`,
+      //   icon: null,
+      //   link: MetabaseSettings.docsUrl(),
+      //   externalLink: true,
+      //   event: `Navbar;Profile Dropdown;About ${tag}`,
+      // },
       // {
       //   title: t`About Metabase`,
       //   icon: null,
