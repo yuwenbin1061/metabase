@@ -39,22 +39,22 @@ export default class ProfileLink extends Component {
     const admin = this.props.user.is_superuser;
     const adminContext = this.props.context === "admin";
     return [
-      {
-        title: t`Account settings`,
-        icon: null,
-        link: Urls.accountSettings(),
-        event: `Navbar;Profile Dropdown;Edit Profile`,
-      },
-      // ...(admin && [
-      //   {
-      //     title: adminContext ? t`Exit admin` : t`Admin`,
-      //     icon: null,
-      //     link: adminContext ? "/" : "/admin",
-      //     event: `Navbar;Profile Dropdown;${
-      //       adminContext ? "Exit Admin" : "Enter Admin"
-      //     }`,
-      //   },
-      // ]),
+      // {
+      //   title: t`Account settings`,
+      //   icon: null,
+      //   link: Urls.accountSettings(),
+      //   event: `Navbar;Profile Dropdown;Edit Profile`,
+      // },
+      ...(admin && [
+        {
+          title: adminContext ? t`Exit admin` : t`Admin`,
+          icon: null,
+          link: adminContext ? "/" : "/admin",
+          event: `Navbar;Profile Dropdown;${
+            adminContext ? "Exit Admin" : "Enter Admin"
+          }`,
+        },
+      ]),  
       {
         title: t`Activity`,
         icon: null,
